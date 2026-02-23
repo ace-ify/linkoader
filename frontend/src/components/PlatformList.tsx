@@ -7,7 +7,7 @@ export default function PlatformList({ visible }: PlatformListProps) {
 
   return (
     <p className="text-muted text-sm text-center mt-4">
-      YouTube · Instagram · TikTok · Twitter/X · Pinterest · Facebook
+      YouTube · Instagram · TikTok · Twitter/X · Pinterest · Facebook · Reddit · Snapchat · Threads · Twitch · LinkedIn · Spotify · Dailymotion
     </p>
   );
 }

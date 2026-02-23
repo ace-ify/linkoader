@@ -26,6 +26,34 @@ ALLOWED_DOMAINS = {
     "pbs.twimg.com",
     "ton.twitter.com",
     "abs.twimg.com",
+    # Reddit
+    "redd.it",
+    "redditmedia.com",
+    "redgifs.com",
+    "preview.redd.it",
+    "v.redd.it",
+    # Snapchat
+    "cf-st.sc",
+    "snap-storage-cdn.l.google.com",
+    "bolt-gcdn.sc",
+    # Threads (shares Instagram CDN)
+    "threads.net",
+    # Twitch
+    "clips-media-assets2.twitch.tv",
+    "vod-secure.twitch.tv",
+    "production.assets.clips.twitchcdn.net",
+    "usher.ttvnw.net",
+    # LinkedIn
+    "media.licdn.com",
+    "dms.licdn.com",
+    # Spotify
+    "audio-ak-spotify-com.akamaized.net",
+    "audio4-ak-spotify-com.akamaized.net",
+    "akamaized.net",
+    # Dailymotion
+    "dailymotion.com",
+    "dmcdn.net",
+    "proxy-im.dailymotion.com",
 }
 
 
