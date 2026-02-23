@@ -23,9 +23,10 @@ _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
 
 
-class CORSMiddleware:
-    """Pure ASGI middleware — injects CORS headers on every response."""
-
+# ---------------------------------------------------------------------------
+# CORS wrapper — pure ASGI, wraps the entire FastAPI app
+# ---------------------------------------------------------------------------
+class CORSWrapper:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
@@ -34,51 +35,51 @@ class CORSMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Pull origin from raw ASGI headers
         req_headers = dict(scope.get("headers") or [])
         origin = req_headers.get(b"origin", b"").decode()
 
         allow = "*" in ALLOWED_ORIGINS or origin in ALLOWED_ORIGINS
         cors_origin = origin if (allow and origin) else "*"
 
-        # Preflight — respond immediately
-        if scope["method"] == "OPTIONS" and allow:
-            response = Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": cors_origin,
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                    "Access-Control-Max-Age": "86400",
-                },
-            )
-            await response(scope, receive, send)
+        # Preflight — respond immediately, never reaches FastAPI
+        if scope["method"] == "OPTIONS":
+            headers = [
+                (b"access-control-allow-origin", cors_origin.encode()),
+                (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+                (b"access-control-allow-headers", b"Content-Type, Authorization"),
+                (b"access-control-max-age", b"86400"),
+                (b"content-length", b"0"),
+            ]
+            await send({"type": "http.response.start", "status": 200, "headers": headers})
+            await send({"type": "http.response.body", "body": b""})
             return
 
-        # Normal requests — patch the response start to inject CORS header
+        # Normal requests — inject CORS header into the response
         async def send_wrapper(message: dict) -> None:
             if message["type"] == "http.response.start" and allow:
                 headers = MutableHeaders(scope=message)
-                headers.append("Access-Control-Allow-Origin", cors_origin)
-                headers.append("Access-Control-Expose-Headers", "Content-Length")
+                headers.append("access-control-allow-origin", cors_origin)
+                headers.append("access-control-expose-headers", "Content-Length")
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
 
 
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     print(f"Loaded extractors: {router.supported_platforms}")
     yield
 
 
-app = FastAPI(title="Linkloader API", version="1.0.0", lifespan=lifespan)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(CORSMiddleware)
+_app = FastAPI(title="Linkloader API", version="1.0.0", lifespan=lifespan)
+_app.state.limiter = limiter
+_app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-@app.exception_handler(ExtractionError)
+@_app.exception_handler(ExtractionError)
 async def extraction_error_handler(request: Request, exc: ExtractionError):
     body = {"error": exc.error_code, "message": exc.message}
     if isinstance(exc, UnsupportedPlatformError):
@@ -86,7 +87,7 @@ async def extraction_error_handler(request: Request, exc: ExtractionError):
     return JSONResponse(status_code=exc.status_code, content=body)
 
 
-@app.post("/api/extract")
+@_app.post("/api/extract")
 @limiter.limit("15/minute;100/hour")
 async def extract(request: Request, body: ExtractRequest):
     url = str(body.url)
@@ -97,7 +98,7 @@ async def extract(request: Request, body: ExtractRequest):
     return result.model_dump()
 
 
-@app.get("/api/proxy-download")
+@_app.get("/api/proxy-download")
 @limiter.limit("5/minute")
 async def proxy_download(
     request: Request,
@@ -107,12 +108,10 @@ async def proxy_download(
     if not is_allowed_domain(url):
         raise HTTPException(status_code=403, detail="Domain not allowed for proxying")
 
-    # HEAD the upstream URL so we can forward Content-Length for real progress
     upstream_headers = await get_upstream_headers(url)
 
     response_headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        # Expose Content-Length so the browser JS can read it cross-origin
         "Access-Control-Expose-Headers": "Content-Length",
     }
     if "Content-Length" in upstream_headers:
@@ -125,10 +124,16 @@ async def proxy_download(
     )
 
 
-@app.get("/api/health")
+@_app.get("/api/health")
 async def health():
     return {
         "status": "ok",
         "version": "1.0.0",
         "extractors": router.supported_platforms,
     }
+
+
+# ---------------------------------------------------------------------------
+# Export: uvicorn picks up `app` which is the CORS-wrapped ASGI callable
+# ---------------------------------------------------------------------------
+app = CORSWrapper(_app)
