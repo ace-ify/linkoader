@@ -6,7 +6,8 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.datastructures import MutableHeaders
 
 from app.exceptions import ExtractionError, UnsupportedPlatformError
 from app.models import ExtractRequest, ErrorResponse
@@ -18,6 +19,52 @@ load_dotenv()
 
 router = ExtractorRouter()
 
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
+
+
+class CORSMiddleware:
+    """Pure ASGI middleware — injects CORS headers on every response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Pull origin from raw ASGI headers
+        req_headers = dict(scope.get("headers") or [])
+        origin = req_headers.get(b"origin", b"").decode()
+
+        allow = "*" in ALLOWED_ORIGINS or origin in ALLOWED_ORIGINS
+        cors_origin = origin if (allow and origin) else "*"
+
+        # Preflight — respond immediately
+        if scope["method"] == "OPTIONS" and allow:
+            response = Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": cors_origin,
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        # Normal requests — patch the response start to inject CORS header
+        async def send_wrapper(message: dict) -> None:
+            if message["type"] == "http.response.start" and allow:
+                headers = MutableHeaders(scope=message)
+                headers.append("Access-Control-Allow-Origin", cors_origin)
+                headers.append("Access-Control-Expose-Headers", "Content-Length")
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,35 +75,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Linkloader API", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-allowed_origins = [
-    o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    if o.strip()
-] or ["*"]
-
-
-class CORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        origin = request.headers.get("origin", "")
-        allow = "*" in allowed_origins or origin in allowed_origins
-
-        if request.method == "OPTIONS":
-            response = Response(status_code=200)
-            if allow:
-                response.headers["Access-Control-Allow-Origin"] = origin or "*"
-                response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-                response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-                response.headers["Access-Control-Max-Age"] = "86400"
-            return response
-
-        response = await call_next(request)
-        if allow:
-            response.headers["Access-Control-Allow-Origin"] = origin or "*"
-            response.headers["Access-Control-Expose-Headers"] = "Content-Length"
-        return response
-
-
 app.add_middleware(CORSMiddleware)
 
 
