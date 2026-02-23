@@ -7,7 +7,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.types import ASGIApp, Receive, Scope, Send
-from starlette.datastructures import MutableHeaders
 
 from app.exceptions import ExtractionError, UnsupportedPlatformError
 from app.models import ExtractRequest, ErrorResponse
@@ -55,11 +54,14 @@ class CORSWrapper:
             return
 
         # Normal requests — inject CORS header into the response
+        origin_bytes = cors_origin.encode()
+
         async def send_wrapper(message: dict) -> None:
-            if message["type"] == "http.response.start" and allow:
-                headers = MutableHeaders(scope=message)
-                headers.append("access-control-allow-origin", cors_origin)
-                headers.append("access-control-expose-headers", "Content-Length")
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                headers.append((b"access-control-allow-origin", origin_bytes))
+                headers.append((b"access-control-expose-headers", b"Content-Length"))
+                message["headers"] = headers
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
