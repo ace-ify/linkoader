@@ -14,13 +14,13 @@ from app.exceptions import (
 EXTRACTION_TIMEOUT = 30
 
 
-class YouTubeExtractor(BaseExtractor):
+class TiktokExtractor(BaseExtractor):
     SUPPORTED_PATTERNS = [
-        r"https?://(www\.)?youtube\.com/watch\?v=[\w-]+",
-        r"https?://(www\.)?youtube\.com/shorts/[\w-]+",
-        r"https?://youtu\.be/[\w-]+",
-        r"https?://(www\.)?youtube\.com/watch\?.*v=[\w-]+",
-        r"https?://(www\.)?youtube\.com/live/[\w-]+",
+        r"https?://(www\.)?tiktok\.com/@[\w.-]+/video/\d+",
+        r"https?://(www\.)?tiktok\.com/t/[\w-]+",
+        r"https?://vm\.tiktok\.com/[\w-]+",
+        r"https?://(www\.)?tiktok\.com/@[\w.-]+/photo/\d+",
+        r"https?://m\.tiktok\.com/v/\d+",
     ]
 
     async def extract(self, url: str) -> MediaInfo:
@@ -31,23 +31,26 @@ class YouTubeExtractor(BaseExtractor):
             )
         except asyncio.TimeoutError:
             raise ExtractionTimeoutError()
-        except (ContentNotFoundError, ExtractionFailedError, UpstreamError,
+        except (ContentNotFoundError, UpstreamError, ExtractionFailedError,
                 AgeRestrictedError, LoginRequiredError):
             raise
         except Exception:
             raise ExtractionFailedError()
 
+        is_image = info.get("ext") in ("jpg", "jpeg", "png", "webp")
+        media_type = "image" if is_image else "video"
+
         return MediaInfo(
-            platform="youtube",
-            title=info.get("title", "Untitled"),
+            platform="tiktok",
+            title=info.get("title") or info.get("description", "TikTok Video")[:80],
             thumbnail=info.get("thumbnail", ""),
-            media_type="video",
+            media_type=media_type,
             format=info.get("ext", "mp4"),
-            quality=f"{info.get('height', 0)}p",
+            quality=f"{info.get('height', 0)}p" if info.get("height") else "original",
             file_size=info.get("filesize") or info.get("filesize_approx") or 0,
             download_url=info["url"],
             duration=info.get("duration"),
-            author=info.get("uploader"),
+            author=info.get("uploader") or info.get("creator"),
         )
 
     def _extract_sync(self, url: str) -> dict:
@@ -55,7 +58,6 @@ class YouTubeExtractor(BaseExtractor):
             "format": "best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
-            "extract_flat": False,
             "socket_timeout": 15,
         }
 

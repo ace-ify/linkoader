@@ -1,8 +1,17 @@
 import asyncio
 import yt_dlp
-from app.extractors.base import BaseExtractor
+from app.extractors.base import BaseExtractor, classify_ytdlp_error
 from app.models import MediaInfo
-from app.exceptions import ContentNotFoundError, ExtractionFailedError, UpstreamError
+from app.exceptions import (
+    ContentNotFoundError,
+    ExtractionFailedError,
+    ExtractionTimeoutError,
+    UpstreamError,
+    AgeRestrictedError,
+    LoginRequiredError,
+)
+
+EXTRACTION_TIMEOUT = 30
 
 
 class FacebookExtractor(BaseExtractor):
@@ -17,8 +26,14 @@ class FacebookExtractor(BaseExtractor):
 
     async def extract(self, url: str) -> MediaInfo:
         try:
-            info = await asyncio.to_thread(self._extract_sync, url)
-        except (ContentNotFoundError, UpstreamError, ExtractionFailedError):
+            info = await asyncio.wait_for(
+                asyncio.to_thread(self._extract_sync, url),
+                timeout=EXTRACTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise ExtractionTimeoutError()
+        except (ContentNotFoundError, UpstreamError, ExtractionFailedError,
+                AgeRestrictedError, LoginRequiredError):
             raise
         except Exception:
             raise ExtractionFailedError()
@@ -41,6 +56,7 @@ class FacebookExtractor(BaseExtractor):
             "format": "best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
+            "socket_timeout": 15,
         }
 
         try:
@@ -50,9 +66,4 @@ class FacebookExtractor(BaseExtractor):
                     raise ContentNotFoundError()
                 return info
         except yt_dlp.utils.DownloadError as e:
-            error_msg = str(e).lower()
-            if "not found" in error_msg or "private" in error_msg or "unavailable" in error_msg:
-                raise ContentNotFoundError()
-            if "urlopen error" in error_msg or "timed out" in error_msg:
-                raise UpstreamError()
-            raise ExtractionFailedError()
+            classify_ytdlp_error(e)

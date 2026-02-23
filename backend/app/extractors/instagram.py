@@ -4,7 +4,15 @@ import httpx
 from bs4 import BeautifulSoup
 from app.extractors.base import BaseExtractor
 from app.models import MediaInfo
-from app.exceptions import ContentNotFoundError, ExtractionFailedError, UpstreamError
+from app.exceptions import (
+    ContentNotFoundError,
+    ExtractionFailedError,
+    ExtractionTimeoutError,
+    UpstreamError,
+    LoginRequiredError,
+)
+
+EXTRACTION_TIMEOUT = 30
 
 
 class InstagramExtractor(BaseExtractor):
@@ -18,14 +26,26 @@ class InstagramExtractor(BaseExtractor):
     async def extract(self, url: str) -> MediaInfo:
         # Try yt-dlp first (works for reels and some posts)
         try:
-            return await self._extract_with_ytdlp(url)
+            return await asyncio.wait_for(
+                self._extract_with_ytdlp(url),
+                timeout=EXTRACTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise ExtractionTimeoutError()
+        except (ContentNotFoundError, LoginRequiredError):
+            raise
         except Exception:
             pass
 
         # Fallback to og:meta scraping for images
         try:
-            return await self._extract_with_scraping(url)
-        except ContentNotFoundError:
+            return await asyncio.wait_for(
+                self._extract_with_scraping(url),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            raise ExtractionTimeoutError()
+        except (ContentNotFoundError, UpstreamError):
             raise
         except Exception:
             raise ExtractionFailedError()
@@ -50,6 +70,7 @@ class InstagramExtractor(BaseExtractor):
             "format": "best",
             "quiet": True,
             "no_warnings": True,
+            "socket_timeout": 15,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -59,6 +80,8 @@ class InstagramExtractor(BaseExtractor):
                 return info
         except yt_dlp.utils.DownloadError as e:
             error_msg = str(e).lower()
+            if "login" in error_msg or "authentication" in error_msg:
+                raise LoginRequiredError()
             if "not found" in error_msg or "private" in error_msg:
                 raise ContentNotFoundError()
             if "urlopen error" in error_msg:
@@ -69,14 +92,16 @@ class InstagramExtractor(BaseExtractor):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
             try:
-                response = await client.get(url, headers=headers, timeout=10.0)
+                response = await client.get(url, headers=headers)
                 response.raise_for_status()
             except httpx.TimeoutException:
                 raise UpstreamError()
-            except httpx.HTTPStatusError:
-                raise ContentNotFoundError()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise ContentNotFoundError()
+                raise UpstreamError()
 
         soup = BeautifulSoup(response.text, "html.parser")
 
@@ -93,7 +118,7 @@ class InstagramExtractor(BaseExtractor):
             media_type = "image"
             fmt = "jpg"
         else:
-            raise ContentNotFoundError()
+            raise ContentNotFoundError("Could not find media in this Instagram post")
 
         title = og_title["content"] if og_title and og_title.get("content") else "Instagram Post"
         thumbnail = og_image["content"] if og_image and og_image.get("content") else ""

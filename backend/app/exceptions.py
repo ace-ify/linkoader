@@ -20,8 +20,23 @@ class UnsupportedPlatformError(ExtractionError):
 
 
 class ContentNotFoundError(ExtractionError):
+    def __init__(self, message: str = "Content not found or is private"):
+        super().__init__("not_found", message, 404)
+
+
+class AgeRestrictedError(ExtractionError):
     def __init__(self):
-        super().__init__("not_found", "Content not found or is private", 404)
+        super().__init__("age_restricted", "This content is age-restricted and requires login", 403)
+
+
+class GeoBlockedError(ExtractionError):
+    def __init__(self):
+        super().__init__("geo_blocked", "This content is not available in your region", 403)
+
+
+class LoginRequiredError(ExtractionError):
+    def __init__(self):
+        super().__init__("login_required", "This content requires authentication to access", 403)
 
 
 class UpstreamError(ExtractionError):
@@ -30,5 +45,10 @@ class UpstreamError(ExtractionError):
 
 
 class ExtractionFailedError(ExtractionError):
+    def __init__(self, message: str = "Failed to extract content"):
+        super().__init__("extraction_failed", message, 503)
+
+
+class ExtractionTimeoutError(ExtractionError):
     def __init__(self):
-        super().__init__("extraction_failed", "Failed to extract content", 503)
+        super().__init__("timeout", "Extraction timed out — the platform may be slow", 504)

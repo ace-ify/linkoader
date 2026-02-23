@@ -1,8 +1,17 @@
+import re
+import asyncio
 import httpx
 from bs4 import BeautifulSoup
 from app.extractors.base import BaseExtractor
 from app.models import MediaInfo
-from app.exceptions import ContentNotFoundError, ExtractionFailedError, UpstreamError
+from app.exceptions import (
+    ContentNotFoundError,
+    ExtractionFailedError,
+    ExtractionTimeoutError,
+    UpstreamError,
+)
+
+EXTRACTION_TIMEOUT = 20
 
 
 class PinterestExtractor(BaseExtractor):
@@ -13,19 +22,34 @@ class PinterestExtractor(BaseExtractor):
     ]
 
     async def extract(self, url: str) -> MediaInfo:
+        try:
+            return await asyncio.wait_for(
+                self._do_extract(url),
+                timeout=EXTRACTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise ExtractionTimeoutError()
+        except (ContentNotFoundError, UpstreamError, ExtractionFailedError):
+            raise
+        except Exception:
+            raise ExtractionFailedError()
+
+    async def _do_extract(self, url: str) -> MediaInfo:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
             try:
-                response = await client.get(url, headers=headers, timeout=10.0)
+                response = await client.get(url, headers=headers)
                 response.raise_for_status()
             except httpx.TimeoutException:
                 raise UpstreamError()
-            except httpx.HTTPStatusError:
-                raise ContentNotFoundError()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise ContentNotFoundError()
+                raise UpstreamError()
 
         soup = BeautifulSoup(response.text, "html.parser")
 
@@ -39,12 +63,11 @@ class PinterestExtractor(BaseExtractor):
             fmt = "mp4"
         elif og_image and og_image.get("content"):
             download_url = og_image["content"]
-            # Try to get original resolution by replacing size suffix
             download_url = self._get_original_url(download_url)
             media_type = "image"
             fmt = "jpg"
         else:
-            raise ContentNotFoundError()
+            raise ContentNotFoundError("Could not find media in this Pinterest pin")
 
         title = og_title["content"] if og_title and og_title.get("content") else "Pinterest Pin"
         thumbnail = og_image["content"] if og_image and og_image.get("content") else ""
@@ -62,7 +85,4 @@ class PinterestExtractor(BaseExtractor):
 
     def _get_original_url(self, url: str) -> str:
         """Replace Pinterest image size suffix to get original resolution."""
-        # Pinterest URLs like: https://i.pinimg.com/736x/xx/xx/xx.jpg
-        # Replace 736x, 564x, 474x, 236x, 170x with originals
-        import re
         return re.sub(r"/\d+x/", "/originals/", url)

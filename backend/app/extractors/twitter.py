@@ -7,20 +7,18 @@ from app.exceptions import (
     ExtractionFailedError,
     ExtractionTimeoutError,
     UpstreamError,
-    AgeRestrictedError,
     LoginRequiredError,
 )
 
 EXTRACTION_TIMEOUT = 30
 
 
-class YouTubeExtractor(BaseExtractor):
+class TwitterExtractor(BaseExtractor):
     SUPPORTED_PATTERNS = [
-        r"https?://(www\.)?youtube\.com/watch\?v=[\w-]+",
-        r"https?://(www\.)?youtube\.com/shorts/[\w-]+",
-        r"https?://youtu\.be/[\w-]+",
-        r"https?://(www\.)?youtube\.com/watch\?.*v=[\w-]+",
-        r"https?://(www\.)?youtube\.com/live/[\w-]+",
+        r"https?://(www\.)?twitter\.com/\w+/status/\d+",
+        r"https?://(www\.)?x\.com/\w+/status/\d+",
+        r"https?://t\.co/[\w-]+",
+        r"https?://(mobile\.)?twitter\.com/\w+/status/\d+",
     ]
 
     async def extract(self, url: str) -> MediaInfo:
@@ -31,23 +29,33 @@ class YouTubeExtractor(BaseExtractor):
             )
         except asyncio.TimeoutError:
             raise ExtractionTimeoutError()
-        except (ContentNotFoundError, ExtractionFailedError, UpstreamError,
-                AgeRestrictedError, LoginRequiredError):
+        except (ContentNotFoundError, UpstreamError, ExtractionFailedError,
+                LoginRequiredError):
             raise
         except Exception:
             raise ExtractionFailedError()
 
+        ext = info.get("ext", "mp4")
+        is_image = ext in ("jpg", "jpeg", "png", "webp")
+        media_type = "image" if is_image else "video"
+
+        title = info.get("title") or info.get("description", "")
+        if title:
+            title = title[:80] + ("…" if len(title) > 80 else "")
+        else:
+            title = "Twitter Post"
+
         return MediaInfo(
-            platform="youtube",
-            title=info.get("title", "Untitled"),
+            platform="twitter",
+            title=title,
             thumbnail=info.get("thumbnail", ""),
-            media_type="video",
-            format=info.get("ext", "mp4"),
-            quality=f"{info.get('height', 0)}p",
+            media_type=media_type,
+            format=ext,
+            quality=f"{info.get('height', 0)}p" if info.get("height") else "original",
             file_size=info.get("filesize") or info.get("filesize_approx") or 0,
             download_url=info["url"],
             duration=info.get("duration"),
-            author=info.get("uploader"),
+            author=info.get("uploader") or info.get("uploader_id"),
         )
 
     def _extract_sync(self, url: str) -> dict:
@@ -55,7 +63,6 @@ class YouTubeExtractor(BaseExtractor):
             "format": "best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
-            "extract_flat": False,
             "socket_timeout": 15,
         }
 

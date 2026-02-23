@@ -2,14 +2,30 @@ import httpx
 from urllib.parse import urlparse
 
 ALLOWED_DOMAINS = {
+    # YouTube
     "googlevideo.com",
     "ytimg.com",
+    # Instagram
     "cdninstagram.com",
-    "fbcdn.net",
-    "pinimg.com",
-    "scontent.xx.fbcdn.net",
     "instagram.com",
+    # Facebook
+    "fbcdn.net",
+    "scontent.xx.fbcdn.net",
     "video.xx.fbcdn.net",
+    # Pinterest
+    "pinimg.com",
+    # TikTok
+    "tiktokcdn.com",
+    "tiktokcdn-us.com",
+    "musical.ly",
+    "tiktokv.com",
+    "tiktokcdn-eu.com",
+    # Twitter / X
+    "twimg.com",
+    "video.twimg.com",
+    "pbs.twimg.com",
+    "ton.twitter.com",
+    "abs.twimg.com",
 }
 
 

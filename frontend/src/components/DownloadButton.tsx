@@ -78,7 +78,7 @@ export default function DownloadButton({
 
       // Stream the body chunk by chunk
       const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
+      const chunks: BlobPart[] = [];
       let receivedBytes = 0;
 
       while (true) {

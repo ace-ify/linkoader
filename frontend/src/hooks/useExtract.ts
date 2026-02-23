@@ -10,6 +10,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   extraction_failed: "Something went wrong extracting this content.",
   rate_limited: "Too many requests.",
   proxy_denied: "Download blocked for security reasons.",
+  age_restricted: "This content is age-restricted and requires login.",
+  geo_blocked: "This content isn't available in your region.",
+  login_required: "This content requires authentication to access.",
+  timeout: "Extraction timed out — the platform may be slow. Try again.",
 };
 
 export function useExtract() {
@@ -31,8 +35,11 @@ export function useExtract() {
       if (err instanceof ApiRequestError) {
         setError(ERROR_MESSAGES[err.error] || err.message);
         setRetryAfter(err.retryAfter);
-      } else {
+      } else if (err instanceof TypeError && 'message' in (err as Error)) {
+        // fetch throws TypeError for network failures
         setError("Network error. Check your connection and try again.");
+      } else {
+        setError("Something unexpected went wrong. Try again.");
       }
     } finally {
       setLoading(false);
