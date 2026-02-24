@@ -92,6 +92,11 @@ _INITIAL_PLAYER_RE = re.compile(
     r"var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;(?:\s*var\s|\s*</script>)",
     re.DOTALL,
 )
+# Embed page also has player response in a different format
+_EMBED_PLAYER_RE = re.compile(
+    r"ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;",
+    re.DOTALL,
+)
 
 
 class YouTubeExtractor(BaseExtractor):
@@ -144,6 +149,7 @@ class YouTubeExtractor(BaseExtractor):
     ) -> tuple[str, dict | None]:
         """Fetch YouTube webpage and extract both visitorData and inline player response.
 
+        Tries the regular watch page first, then the embed page as fallback.
         Returns (visitor_data, player_response_dict_or_None).
         """
         visitor_data = ""
@@ -172,6 +178,50 @@ class YouTubeExtractor(BaseExtractor):
                         pass
         except Exception:
             pass
+
+        # Check if the watch page player response is actually playable
+        wp_ok = (
+            player_response
+            and player_response.get("playabilityStatus", {}).get("status") == "OK"
+            and player_response.get("streamingData", {}).get("formats")
+        )
+
+        # If watch page didn't give us a playable response, try the embed page
+        # Embeds have lighter bot detection since they're designed for third-party sites
+        if not wp_ok:
+            try:
+                embed_resp = await client.get(
+                    f"https://www.youtube.com/embed/{video_id}",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                        "Referer": "https://www.google.com/",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                    follow_redirects=True,
+                )
+                if embed_resp.status_code == 200:
+                    embed_text = embed_resp.text
+                    # Get visitorData from embed if we don't have it yet
+                    if not visitor_data:
+                        m = _VISITOR_DATA_RE.search(embed_text)
+                        if m:
+                            visitor_data = m.group(1)
+                    # Extract player response from embed page
+                    m3 = _EMBED_PLAYER_RE.search(embed_text)
+                    if m3:
+                        try:
+                            embed_player = json.loads(m3.group(1))
+                            # Only use embed response if it's playable
+                            if (
+                                embed_player.get("playabilityStatus", {}).get("status") == "OK"
+                                and embed_player.get("streamingData")
+                            ):
+                                player_response = embed_player
+                        except json.JSONDecodeError:
+                            pass
+            except Exception:
+                pass
+
         return visitor_data, player_response
 
     def _player_response_to_media(self, data: dict) -> MediaInfo | None:
