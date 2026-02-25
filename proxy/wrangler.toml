@@ -1,0 +1,6 @@
+name = "linkoader-proxy"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+[vars]
+PROXY_SECRET = "509LyuJbuTyv0JY4uQJoA15jhaX8lufq8DCm2tC5iWs"

@@ -1,6 +1,11 @@
 from abc import ABC, abstractmethod
 from app.models import MediaInfo
+import os
 import re
+
+# Cloudflare Worker proxy config — set these env vars on Render
+CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "")
+CF_PROXY_SECRET = os.environ.get("CF_PROXY_SECRET", "")
 
 
 class BaseExtractor(ABC):

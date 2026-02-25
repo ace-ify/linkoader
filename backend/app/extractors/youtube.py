@@ -1,9 +1,10 @@
 import asyncio
+import copy
 import json
 import re
 import httpx
 import yt_dlp
-from app.extractors.base import BaseExtractor, classify_ytdlp_error
+from app.extractors.base import BaseExtractor, classify_ytdlp_error, CF_PROXY_URL, CF_PROXY_SECRET
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -20,9 +21,24 @@ EXTRACTION_TIMEOUT = 45
 _INNERTUBE_API_URL = "https://www.youtube.com/youtubei/v1/player"
 _INNERTUBE_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
 
-# Client configs ordered by datacenter-friendliness.
+# IOS client — works best through CF Worker proxy with visitorData
+_IOS_CLIENT = {
+    "context": {
+        "client": {
+            "clientName": "IOS",
+            "clientVersion": "21.02.3",
+            "deviceMake": "Apple",
+            "deviceModel": "iPhone16,2",
+            "osName": "iPhone",
+            "osVersion": "18.3.2.22D82",
+            "hl": "en",
+        },
+    },
+    "user_agent": "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+}
+
+# Fallback clients for direct (non-proxy) InnerTube calls
 _INNERTUBE_CLIENTS = [
-    # TV embedded — works well on datacenter IPs, fewer restrictions
     {
         "name": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
         "context": {
@@ -31,13 +47,10 @@ _INNERTUBE_CLIENTS = [
                 "clientVersion": "2.0",
                 "hl": "en",
             },
-            "thirdParty": {
-                "embedUrl": "https://www.google.com",
-            },
+            "thirdParty": {"embedUrl": "https://www.google.com"},
         },
         "user_agent": "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36",
     },
-    # Android VR — no PO token needed, no JS player
     {
         "name": "ANDROID_VR",
         "context": {
@@ -54,34 +67,7 @@ _INNERTUBE_CLIENTS = [
         },
         "user_agent": "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     },
-    # WEB_CREATOR — YouTube Studio client, less aggressive bot detection
-    {
-        "name": "WEB_CREATOR",
-        "context": {
-            "client": {
-                "clientName": "WEB_CREATOR",
-                "clientVersion": "1.20241203.01.00",
-                "hl": "en",
-            },
-        },
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    },
-    # IOS — mobile client fallback
-    {
-        "name": "IOS",
-        "context": {
-            "client": {
-                "clientName": "IOS",
-                "clientVersion": "21.02.3",
-                "deviceMake": "Apple",
-                "deviceModel": "iPhone16,2",
-                "osName": "iPhone",
-                "osVersion": "18.3.2.22D82",
-                "hl": "en",
-            },
-        },
-        "user_agent": "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
-    },
+    _IOS_CLIENT,
 ]
 
 _VIDEO_ID_RE = re.compile(
@@ -90,11 +76,6 @@ _VIDEO_ID_RE = re.compile(
 _VISITOR_DATA_RE = re.compile(r'"visitorData"\s*:\s*"([^"]+)"')
 _INITIAL_PLAYER_RE = re.compile(
     r"var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;(?:\s*var\s|\s*</script>)",
-    re.DOTALL,
-)
-# Embed page also has player response in a different format
-_EMBED_PLAYER_RE = re.compile(
-    r"ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;",
     re.DOTALL,
 )
 
@@ -113,14 +94,30 @@ class YouTubeExtractor(BaseExtractor):
         if not video_id:
             raise ContentNotFoundError("Could not parse video ID from URL")
 
-        # Strategy 1: Webpage scrape + InnerTube API
-        # Fetches the webpage once to get both the inline player response AND visitorData,
-        # then falls back to InnerTube API clients if the inline data is blocked.
+        # Strategy 1: CF Worker proxy (visitorData + IOS client via Cloudflare's trusted IPs)
+        if CF_PROXY_URL and CF_PROXY_SECRET:
+            try:
+                result = await asyncio.wait_for(
+                    self._extract_via_proxy(video_id),
+                    timeout=EXTRACTION_TIMEOUT,
+                )
+                if result:
+                    return result
+            except asyncio.TimeoutError:
+                raise ExtractionTimeoutError()
+            except (ContentNotFoundError, AgeRestrictedError):
+                raise
+            except Exception:
+                pass
+
+        # Strategy 2: Direct webpage scrape + InnerTube API (works on residential IPs)
         try:
-            return await asyncio.wait_for(
-                self._extract_innertube(video_id),
+            result = await asyncio.wait_for(
+                self._extract_innertube_direct(video_id),
                 timeout=EXTRACTION_TIMEOUT,
             )
+            if result:
+                return result
         except asyncio.TimeoutError:
             raise ExtractionTimeoutError()
         except (ContentNotFoundError, AgeRestrictedError, LoginRequiredError):
@@ -128,7 +125,7 @@ class YouTubeExtractor(BaseExtractor):
         except Exception:
             pass
 
-        # Strategy 2: yt-dlp fallback (better format selection, works on residential IPs)
+        # Strategy 3: yt-dlp fallback
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(self._extract_ytdlp, url),
@@ -144,88 +141,161 @@ class YouTubeExtractor(BaseExtractor):
 
         return self._info_to_media(info)
 
-    async def _fetch_webpage_data(
-        self, client: httpx.AsyncClient, video_id: str
-    ) -> tuple[str, dict | None]:
-        """Fetch YouTube webpage and extract both visitorData and inline player response.
+    # ── CF Worker proxy strategy ──────────────────────────────────────
 
-        Tries the regular watch page first, then the embed page as fallback.
-        Returns (visitor_data, player_response_dict_or_None).
+    async def _extract_via_proxy(self, video_id: str) -> MediaInfo | None:
+        """Use CF Worker proxy to bypass YouTube's datacenter IP blocking.
+
+        1. Proxy fetches YouTube page → we extract visitorData
+        2. Proxy calls InnerTube API with visitorData + IOS client → streams
         """
-        visitor_data = ""
-        player_response = None
-        try:
-            resp = await client.get(
-                f"https://www.youtube.com/watch?v={video_id}",
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                follow_redirects=True,
-            )
-            if resp.status_code == 200:
-                text = resp.text
-                # Extract visitorData
-                m = _VISITOR_DATA_RE.search(text)
-                if m:
-                    visitor_data = m.group(1)
-                # Extract inline ytInitialPlayerResponse (contains full player data)
-                m2 = _INITIAL_PLAYER_RE.search(text)
-                if m2:
-                    try:
-                        player_response = json.loads(m2.group(1))
-                    except json.JSONDecodeError:
-                        pass
-        except Exception:
-            pass
+        proxy_headers = {
+            "Content-Type": "application/json",
+            "X-Proxy-Secret": CF_PROXY_SECRET,
+        }
 
-        # Check if the watch page player response is actually playable
-        wp_ok = (
-            player_response
-            and player_response.get("playabilityStatus", {}).get("status") == "OK"
-            and player_response.get("streamingData", {}).get("formats")
-        )
-
-        # If watch page didn't give us a playable response, try the embed page
-        # Embeds have lighter bot detection since they're designed for third-party sites
-        if not wp_ok:
+        async with httpx.AsyncClient(timeout=25) as client:
+            # Step 1: Get visitorData from YouTube page via proxy
+            visitor_data = ""
             try:
-                embed_resp = await client.get(
-                    f"https://www.youtube.com/embed/{video_id}",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                        "Referer": "https://www.google.com/",
-                        "Accept-Language": "en-US,en;q=0.9",
+                vd_resp = await client.post(
+                    CF_PROXY_URL,
+                    headers=proxy_headers,
+                    json={
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "headers": {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                            "Accept-Language": "en-US,en;q=0.9",
+                        },
                     },
-                    follow_redirects=True,
                 )
-                if embed_resp.status_code == 200:
-                    embed_text = embed_resp.text
-                    # Get visitorData from embed if we don't have it yet
-                    if not visitor_data:
-                        m = _VISITOR_DATA_RE.search(embed_text)
-                        if m:
-                            visitor_data = m.group(1)
-                    # Extract player response from embed page
-                    m3 = _EMBED_PLAYER_RE.search(embed_text)
-                    if m3:
+                if vd_resp.status_code == 200:
+                    m = _VISITOR_DATA_RE.search(vd_resp.text)
+                    if m:
+                        visitor_data = m.group(1)
+
+                    # Also try to get player response from webpage
+                    m2 = _INITIAL_PLAYER_RE.search(vd_resp.text)
+                    if m2:
                         try:
-                            embed_player = json.loads(m3.group(1))
-                            # Only use embed response if it's playable
-                            if (
-                                embed_player.get("playabilityStatus", {}).get("status") == "OK"
-                                and embed_player.get("streamingData")
-                            ):
-                                player_response = embed_player
-                        except json.JSONDecodeError:
+                            wp_data = json.loads(m2.group(1))
+                            result = self._player_response_to_media(wp_data)
+                            if result:
+                                return result
+                        except (json.JSONDecodeError, Exception):
                             pass
             except Exception:
                 pass
 
-        return visitor_data, player_response
+            if not visitor_data:
+                return None
+
+            # Step 2: Call InnerTube API via proxy with visitorData + IOS client
+            context = copy.deepcopy(_IOS_CLIENT["context"])
+            context["client"]["visitorData"] = visitor_data
+
+            api_resp = await client.post(
+                CF_PROXY_URL,
+                headers=proxy_headers,
+                json={
+                    "url": f"{_INNERTUBE_API_URL}?key={_INNERTUBE_API_KEY}&prettyPrint=false",
+                    "method": "POST",
+                    "headers": {
+                        "User-Agent": _IOS_CLIENT["user_agent"],
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.youtube.com",
+                        "X-Goog-Visitor-Id": visitor_data,
+                    },
+                    "payload": {
+                        "videoId": video_id,
+                        "context": context,
+                        "contentCheckOk": True,
+                        "racyCheckOk": True,
+                    },
+                },
+            )
+
+            if api_resp.status_code != 200:
+                return None
+
+            data = api_resp.json()
+            return self._player_response_to_media(data)
+
+    # ── Direct InnerTube strategy (no proxy) ──────────────────────────
+
+    async def _extract_innertube_direct(self, video_id: str) -> MediaInfo | None:
+        """Direct InnerTube extraction — works on residential IPs."""
+        async with httpx.AsyncClient(timeout=20) as client:
+            # Fetch webpage for visitorData and inline player response
+            visitor_data = ""
+            try:
+                resp = await client.get(
+                    f"https://www.youtube.com/watch?v={video_id}",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                    follow_redirects=True,
+                )
+                if resp.status_code == 200:
+                    text = resp.text
+                    m = _VISITOR_DATA_RE.search(text)
+                    if m:
+                        visitor_data = m.group(1)
+                    # Try inline player response
+                    m2 = _INITIAL_PLAYER_RE.search(text)
+                    if m2:
+                        try:
+                            wp_data = json.loads(m2.group(1))
+                            result = self._player_response_to_media(wp_data)
+                            if result:
+                                return result
+                        except (json.JSONDecodeError, Exception):
+                            pass
+            except Exception:
+                pass
+
+            # Try each InnerTube client
+            for cfg in _INNERTUBE_CLIENTS:
+                try:
+                    context = copy.deepcopy(cfg["context"])
+                    if visitor_data:
+                        context["client"]["visitorData"] = visitor_data
+
+                    headers = {
+                        "User-Agent": cfg["user_agent"],
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.youtube.com",
+                    }
+                    if visitor_data:
+                        headers["X-Goog-Visitor-Id"] = visitor_data
+
+                    resp = await client.post(
+                        _INNERTUBE_API_URL,
+                        params={"key": _INNERTUBE_API_KEY, "prettyPrint": "false"},
+                        json={
+                            "videoId": video_id,
+                            "context": context,
+                            "contentCheckOk": True,
+                            "racyCheckOk": True,
+                        },
+                        headers=headers,
+                    )
+                    if resp.status_code == 200:
+                        result = self._player_response_to_media(resp.json())
+                        if result:
+                            return result
+                except (ContentNotFoundError, AgeRestrictedError):
+                    raise
+                except Exception:
+                    continue
+
+        return None
+
+    # ── Shared helpers ────────────────────────────────────────────────
 
     def _player_response_to_media(self, data: dict) -> MediaInfo | None:
-        """Convert a raw player response dict (from webpage or API) to MediaInfo."""
+        """Convert a raw player response dict to MediaInfo."""
         playability = data.get("playabilityStatus", {})
         status = playability.get("status", "")
 
@@ -233,7 +303,7 @@ class YouTubeExtractor(BaseExtractor):
             reason = playability.get("reason", "").lower()
             if "age" in reason:
                 raise AgeRestrictedError()
-            return None  # blocked, try other strategies
+            return None
 
         if status == "UNPLAYABLE":
             raise ContentNotFoundError(
@@ -250,14 +320,25 @@ class YouTubeExtractor(BaseExtractor):
             return None
 
         streaming = data.get("streamingData", {})
-        formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
-        if not formats:
+        all_formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
+        if not all_formats:
             return None
 
-        # Pick best pre-merged format (has both video+audio)
+        # Prefer combined (video+audio) formats
         merged = [f for f in streaming.get("formats", []) if f.get("url")]
         if not merged:
-            merged = [f for f in formats if f.get("url")]
+            # IOS client returns only adaptive — pick best video stream with URL
+            video_streams = [
+                f for f in streaming.get("adaptiveFormats", [])
+                if f.get("url") and f.get("height")
+            ]
+            if video_streams:
+                merged = video_streams
+
+        if not merged:
+            # Last resort: anything with a URL
+            merged = [f for f in all_formats if f.get("url")]
+
         if not merged:
             return None
 
@@ -270,9 +351,13 @@ class YouTubeExtractor(BaseExtractor):
         if thumbs:
             thumbnail = thumbs[-1].get("url", "")
 
+        title = details.get("title", "Untitled")
+        if len(title) > 80:
+            title = title[:77] + "\u2026"
+
         return MediaInfo(
             platform="youtube",
-            title=details.get("title", "Untitled"),
+            title=title,
             thumbnail=thumbnail,
             media_type="video",
             format=best.get("mimeType", "video/mp4").split(";")[0].split("/")[-1],
@@ -283,89 +368,8 @@ class YouTubeExtractor(BaseExtractor):
             author=details.get("author", ""),
         )
 
-    async def _extract_innertube(self, video_id: str) -> MediaInfo:
-        """Fetch webpage for inline player data, then try InnerTube API clients."""
-        last_error: Exception | None = None
-
-        async with httpx.AsyncClient(timeout=20) as client:
-            # Step 1: Fetch webpage — get visitorData AND inline player response
-            visitor_data, wp_player = await self._fetch_webpage_data(client, video_id)
-
-            # Step 2: Try the inline player response first (often works even on datacenter IPs)
-            if wp_player:
-                try:
-                    result = self._player_response_to_media(wp_player)
-                    if result:
-                        return result
-                except (ContentNotFoundError, AgeRestrictedError):
-                    raise
-                except Exception:
-                    pass
-
-            # Step 3: Try each InnerTube API client with visitorData
-            for cfg in _INNERTUBE_CLIENTS:
-                try:
-                    result = await self._try_innertube_client(client, video_id, cfg, visitor_data)
-                    if result:
-                        return result
-                except (ContentNotFoundError, AgeRestrictedError):
-                    raise
-                except Exception as e:
-                    last_error = e
-                    continue
-
-        if last_error:
-            raise last_error
-        raise ExtractionFailedError("All InnerTube clients failed")
-
-    async def _try_innertube_client(
-        self, client: httpx.AsyncClient, video_id: str, cfg: dict, visitor_data: str
-    ) -> MediaInfo | None:
-        import copy
-        context = copy.deepcopy(cfg["context"])
-
-        # Inject visitorData into context if available
-        if visitor_data:
-            context["client"]["visitorData"] = visitor_data
-
-        body = {
-            "videoId": video_id,
-            "context": context,
-            "playbackContext": {
-                "contentPlaybackContext": {
-                    "html5Preference": "HTML5_PREF_WANTS",
-                },
-            },
-            "contentCheckOk": True,
-            "racyCheckOk": True,
-        }
-
-        headers = {
-            "User-Agent": cfg["user_agent"],
-            "X-YouTube-Client-Name": cfg["context"]["client"]["clientName"],
-            "X-YouTube-Client-Version": cfg["context"]["client"]["clientVersion"],
-            "Origin": "https://www.youtube.com",
-            "Content-Type": "application/json",
-        }
-
-        if visitor_data:
-            headers["X-Goog-Visitor-Id"] = visitor_data
-
-        resp = await client.post(
-            _INNERTUBE_API_URL,
-            params={"key": _INNERTUBE_API_KEY, "prettyPrint": "false"},
-            json=body,
-            headers=headers,
-        )
-
-        if resp.status_code != 200:
-            return None
-
-        data = resp.json()
-        return self._player_response_to_media(data)
-
     def _extract_ytdlp(self, url: str) -> dict:
-        """Fallback: use yt-dlp (works better on residential IPs)."""
+        """Fallback: use yt-dlp."""
         opts = {
             "format": "best[ext=mp4]/best",
             "quiet": True,
