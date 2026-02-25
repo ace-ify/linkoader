@@ -1,8 +1,7 @@
 import re
 import asyncio
-import httpx
 from bs4 import BeautifulSoup
-from app.extractors.base import BaseExtractor
+from app.extractors.base import BaseExtractor, proxy_fetch
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -40,16 +39,15 @@ class PinterestExtractor(BaseExtractor):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
-            try:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-            except httpx.TimeoutException:
-                raise UpstreamError()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    raise ContentNotFoundError()
-                raise UpstreamError()
+        try:
+            response = await proxy_fetch(url, headers=headers, timeout=12.0)
+        except Exception:
+            raise UpstreamError()
+
+        if response.status_code == 404:
+            raise ContentNotFoundError()
+        if response.status_code != 200:
+            raise UpstreamError()
 
         soup = BeautifulSoup(response.text, "html.parser")
 

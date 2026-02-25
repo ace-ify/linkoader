@@ -1,11 +1,66 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from app.models import MediaInfo
+import httpx
 import os
 import re
 
 # Cloudflare Worker proxy config — set these env vars on Render
 CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "")
 CF_PROXY_SECRET = os.environ.get("CF_PROXY_SECRET", "")
+
+
+@dataclass
+class ProxyResponse:
+    """Lightweight response object returned by proxy_fetch."""
+    status_code: int
+    text: str
+
+    def json(self):
+        import json
+        return json.loads(self.text)
+
+
+async def proxy_fetch(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    json_body: dict | None = None,
+    timeout: float = 15.0,
+) -> ProxyResponse:
+    """Fetch a URL, routing through CF Worker proxy if configured.
+
+    Falls back to direct httpx request if proxy is not set up.
+    """
+    if CF_PROXY_URL and CF_PROXY_SECRET:
+        # Route through Cloudflare Worker
+        payload: dict = {"url": url, "method": method}
+        if headers:
+            payload["headers"] = headers
+        if json_body and method in ("POST", "PUT", "PATCH"):
+            payload["payload"] = json_body
+
+        async with httpx.AsyncClient(timeout=timeout + 10) as client:
+            resp = await client.post(
+                CF_PROXY_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Proxy-Secret": CF_PROXY_SECRET,
+                },
+                json=payload,
+            )
+            return ProxyResponse(status_code=resp.status_code, text=resp.text)
+    else:
+        # Direct request
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            if method == "GET":
+                resp = await client.get(url, headers=headers or {})
+            else:
+                resp = await client.request(
+                    method, url, headers=headers or {}, json=json_body,
+                )
+            return ProxyResponse(status_code=resp.status_code, text=resp.text)
 
 
 class BaseExtractor(ABC):

@@ -1,8 +1,7 @@
 import asyncio
 import re
-import httpx
 import yt_dlp
-from app.extractors.base import BaseExtractor, classify_ytdlp_error
+from app.extractors.base import BaseExtractor, classify_ytdlp_error, proxy_fetch
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -81,40 +80,35 @@ class RedditExtractor(BaseExtractor):
         )
 
     async def _extract_direct(self, url: str) -> MediaInfo | None:
-        """Use Reddit's public JSON API — no auth needed, works on datacenter IPs."""
-        # Normalize URL: strip query params, ensure no trailing slash
+        """Use Reddit's public JSON API — no auth needed."""
         clean_url = url.split("?")[0].rstrip("/")
 
-        # Handle short URLs by following redirects
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            # For redd.it / v.redd.it / i.redd.it / share links, resolve first
-            if "redd.it" in url or "/s/" in url:
-                try:
-                    head_resp = await client.head(url, headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; bot)",
-                    })
-                    resolved = str(head_resp.url)
-                    if "reddit.com/r/" in resolved:
-                        clean_url = resolved.split("?")[0].rstrip("/")
-                    else:
-                        return None
-                except Exception:
-                    return None
-
-            # Fetch JSON for the post
-            json_url = clean_url + ".json"
-            resp = await client.get(json_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Linkloader/1.0)",
-            })
-
-            if resp.status_code == 404:
-                raise ContentNotFoundError("Reddit post not found")
-            if resp.status_code == 403:
-                raise LoginRequiredError()
-            if resp.status_code != 200:
+        # For short URLs, resolve via proxy_fetch HEAD-like GET
+        if "redd.it" in url or "/s/" in url:
+            try:
+                resp = await proxy_fetch(url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; bot)",
+                })
+                # proxy_fetch follows redirects, check if we got a reddit page
+                # We can't get the final URL from proxy_fetch, so try the original
+                return None  # fall through to yt-dlp for short URLs
+            except Exception:
                 return None
 
-            data = resp.json()
+        # Fetch JSON for the post
+        json_url = clean_url + ".json"
+        resp = await proxy_fetch(json_url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Linkloader/1.0)",
+        })
+
+        if resp.status_code == 404:
+            raise ContentNotFoundError("Reddit post not found")
+        if resp.status_code == 403:
+            raise LoginRequiredError()
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
 
         # Parse the Reddit API response
         if not isinstance(data, list) or len(data) < 1:

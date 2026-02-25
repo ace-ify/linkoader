@@ -1,7 +1,6 @@
 import asyncio
 import re
-import httpx
-from app.extractors.base import BaseExtractor
+from app.extractors.base import BaseExtractor, proxy_fetch
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -64,94 +63,84 @@ class SpotifyExtractor(BaseExtractor):
 
     async def _extract_episode(self, episode_id: str, original_url: str) -> MediaInfo:
         """Extract podcast episode using Spotify's embed endpoint."""
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            # Get metadata from oEmbed API (always works, no auth)
-            oembed_resp = await client.get(
-                "https://open.spotify.com/oembed",
-                params={"url": original_url},
-                headers={"User-Agent": "Mozilla/5.0 (compatible; Linkloader/1.0)"},
+        # Get metadata from oEmbed API (always works, no auth)
+        oembed_resp = await proxy_fetch(
+            f"https://open.spotify.com/oembed?url={original_url}",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; Linkloader/1.0)"},
+        )
+
+        if oembed_resp.status_code == 404:
+            raise ContentNotFoundError("Spotify episode not found")
+        if oembed_resp.status_code != 200:
+            raise ExtractionFailedError("Could not fetch episode metadata")
+
+        oembed = oembed_resp.json()
+
+        title = oembed.get("title", "Spotify Episode")
+        if len(title) > 80:
+            title = title[:77] + "\u2026"
+        thumbnail = oembed.get("thumbnail_url", "")
+
+        # Try to get the actual audio stream from the embed page
+        embed_url = f"https://open.spotify.com/embed/episode/{episode_id}"
+        embed_resp = await proxy_fetch(embed_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        })
+
+        if embed_resp.status_code != 200:
+            raise ExtractionFailedError("Could not access episode embed page")
+
+        text = embed_resp.text
+
+        # Spotify embeds contain a JSON blob with episode data
+        audio_url = ""
+
+        # Try extracting from __NEXT_DATA__ or similar embedded JSON
+        import json
+        for pattern in [
+            r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            r'"audioPreview"\s*:\s*\{[^}]*"url"\s*:\s*"([^"]+)"',
+            r'"audio_preview_url"\s*:\s*"([^"]+)"',
+        ]:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                if "audioPreview" in pattern or "audio_preview" in pattern:
+                    audio_url = match.group(1)
+                    break
+                else:
+                    # Parse __NEXT_DATA__
+                    try:
+                        next_data = json.loads(match.group(1))
+                        props = next_data.get("props", {}).get("pageProps", {})
+                        state = props.get("state", {})
+                        ep_data = state.get("data", {}).get("entity", {})
+                        audio_url = ep_data.get("audioPreview", {}).get("url", "")
+                        if not audio_url:
+                            audio_url = ep_data.get("audio_preview_url", "")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+
+        if not audio_url:
+            # As a last resort, check for any mp3/audio URL in the page
+            mp3_match = re.search(r'(https://[^"]*\.mp3[^"]*)', text)
+            if mp3_match:
+                audio_url = mp3_match.group(1)
+
+        if not audio_url:
+            raise ContentNotFoundError(
+                "Could not extract audio from this podcast episode. "
+                "Spotify may require authentication for this content."
             )
 
-            if oembed_resp.status_code == 404:
-                raise ContentNotFoundError("Spotify episode not found")
-            if oembed_resp.status_code != 200:
-                raise ExtractionFailedError("Could not fetch episode metadata")
-
-            oembed = oembed_resp.json()
-
-            title = oembed.get("title", "Spotify Episode")
-            if len(title) > 80:
-                title = title[:77] + "\u2026"
-            thumbnail = oembed.get("thumbnail_url", "")
-
-            # Try to get the actual audio stream from the embed page
-            embed_url = f"https://open.spotify.com/embed/episode/{episode_id}"
-            embed_resp = await client.get(embed_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            })
-
-            if embed_resp.status_code != 200:
-                raise ExtractionFailedError("Could not access episode embed page")
-
-            # Look for audio URL in the embed page's data
-            text = embed_resp.text
-
-            # Spotify embeds contain a JSON blob with episode data
-            # Look for the accessToken and episode URI to call their API
-            audio_url = ""
-
-            # Try extracting from __NEXT_DATA__ or similar embedded JSON
-            import json
-            for pattern in [
-                r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-                r'"audioPreview"\s*:\s*\{[^}]*"url"\s*:\s*"([^"]+)"',
-                r'"audio_preview_url"\s*:\s*"([^"]+)"',
-            ]:
-                match = re.search(pattern, text, re.DOTALL)
-                if match:
-                    if "audioPreview" in pattern or "audio_preview" in pattern:
-                        audio_url = match.group(1)
-                        break
-                    else:
-                        # Parse __NEXT_DATA__
-                        try:
-                            next_data = json.loads(match.group(1))
-                            # Navigate the data structure
-                            props = next_data.get("props", {}).get("pageProps", {})
-                            state = props.get("state", {})
-                            ep_data = state.get("data", {}).get("entity", {})
-                            audio_url = ep_data.get("audioPreview", {}).get("url", "")
-                            if not audio_url:
-                                audio_url = ep_data.get("audio_preview_url", "")
-
-                            # Get duration if available
-                            duration_ms = ep_data.get("duration", {}).get("totalMilliseconds")
-                            if not duration_ms:
-                                duration_ms = ep_data.get("duration_ms")
-                        except (json.JSONDecodeError, AttributeError):
-                            pass
-
-            if not audio_url:
-                # As a last resort, check for any mp3/audio URL in the page
-                mp3_match = re.search(r'(https://[^"]*\.mp3[^"]*)', text)
-                if mp3_match:
-                    audio_url = mp3_match.group(1)
-
-            if not audio_url:
-                raise ContentNotFoundError(
-                    "Could not extract audio from this podcast episode. "
-                    "Spotify may require authentication for this content."
-                )
-
-            return MediaInfo(
-                platform="spotify",
-                title=title,
-                thumbnail=thumbnail,
-                media_type="audio",
-                format="mp3",
-                quality="preview",
-                file_size=0,
-                download_url=audio_url,
-                duration=None,
-                author=oembed.get("provider_name", "Spotify"),
-            )
+        return MediaInfo(
+            platform="spotify",
+            title=title,
+            thumbnail=thumbnail,
+            media_type="audio",
+            format="mp3",
+            quality="preview",
+            file_size=0,
+            download_url=audio_url,
+            duration=None,
+            author=oembed.get("provider_name", "Spotify"),
+        )

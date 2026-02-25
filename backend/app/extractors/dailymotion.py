@@ -1,8 +1,7 @@
 import asyncio
 import re
-import httpx
 import yt_dlp
-from app.extractors.base import BaseExtractor, classify_ytdlp_error
+from app.extractors.base import BaseExtractor, classify_ytdlp_error, proxy_fetch
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -75,25 +74,23 @@ class DailymotionExtractor(BaseExtractor):
         )
 
     async def _extract_direct(self, url: str) -> MediaInfo | None:
-        """Use Dailymotion's player metadata API — works on datacenter IPs."""
+        """Use Dailymotion's player metadata API."""
         video_id = self._parse_video_id(url)
         if not video_id:
             return None
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            # Dailymotion player metadata endpoint
-            metadata_url = f"https://www.dailymotion.com/player/metadata/video/{video_id}"
-            resp = await client.get(metadata_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Referer": f"https://www.dailymotion.com/video/{video_id}",
-            })
+        metadata_url = f"https://www.dailymotion.com/player/metadata/video/{video_id}"
+        resp = await proxy_fetch(metadata_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Referer": f"https://www.dailymotion.com/video/{video_id}",
+        })
 
-            if resp.status_code == 404:
-                raise ContentNotFoundError("Dailymotion video not found")
-            if resp.status_code != 200:
-                return None
+        if resp.status_code == 404:
+            raise ContentNotFoundError("Dailymotion video not found")
+        if resp.status_code != 200:
+            return None
 
-            data = resp.json()
+        data = resp.json()
 
         # Check for errors
         error = data.get("error")
