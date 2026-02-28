@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -16,10 +18,20 @@ from app.router import ExtractorRouter
 
 load_dotenv()
 
+logger = logging.getLogger("linkloader")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 router = ExtractorRouter()
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
+
+# Maximum time we allow an extraction before returning an error.
+# Must be LESS than Render/Railway's request timeout (typically 30s).
+EXTRACT_TIMEOUT = 25
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +84,9 @@ class CORSWrapper:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    print(f"Loaded extractors: {router.supported_platforms}")
+    from app.stealth import HAS_CURL_CFFI
+    logger.info(f"Loaded extractors: {router.supported_platforms}")
+    logger.info(f"curl_cffi available: {HAS_CURL_CFFI}")
     yield
 
 
@@ -96,8 +110,37 @@ async def extract(request: Request, body: ExtractRequest):
     extractor = router.resolve(url)
     if not extractor:
         raise UnsupportedPlatformError(supported=router.supported_platforms)
-    result = await extractor.extract(url)
-    return result.model_dump()
+
+    logger.info(f"Extracting [{extractor.platform_name}]: {url}")
+
+    try:
+        result = await asyncio.wait_for(
+            extractor.extract(url),
+            timeout=EXTRACT_TIMEOUT,
+        )
+        logger.info(f"Success [{extractor.platform_name}]: {result.title[:50]}")
+        return result.model_dump()
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout [{extractor.platform_name}]: {url} (>{EXTRACT_TIMEOUT}s)")
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "timeout",
+                "message": f"Extraction timed out after {EXTRACT_TIMEOUT}s. "
+                           "The platform may be throttling this server. Try again shortly.",
+            },
+        )
+    except ExtractionError:
+        raise  # Already handled by extraction_error_handler
+    except Exception as e:
+        logger.error(f"Unhandled error [{extractor.platform_name}]: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "extraction_failed",
+                "message": "Failed to extract media. Try again.",
+            },
+        )
 
 
 @_app.get("/api/proxy-download")

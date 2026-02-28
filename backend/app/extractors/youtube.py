@@ -16,7 +16,7 @@ from app.exceptions import (
     LoginRequiredError,
 )
 
-EXTRACTION_TIMEOUT = 45
+EXTRACTION_TIMEOUT = 20  # Must fit within main.py's 25s limit
 
 # InnerTube API — same endpoint YouTube's own apps hit.
 _INNERTUBE_API_URL = "https://www.youtube.com/youtubei/v1/player"
@@ -125,7 +125,7 @@ class YouTubeExtractor(BaseExtractor):
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(self._extract_ytdlp, url),
-                timeout=EXTRACTION_TIMEOUT,
+                timeout=15,  # Fast fail so we can try other strategies
             )
             return self._info_to_media(info)
         except asyncio.TimeoutError:
@@ -140,7 +140,7 @@ class YouTubeExtractor(BaseExtractor):
             try:
                 result = await asyncio.wait_for(
                     self._extract_via_proxy(video_id),
-                    timeout=EXTRACTION_TIMEOUT,
+                    timeout=12,
                 )
                 if result:
                     return result
@@ -155,7 +155,7 @@ class YouTubeExtractor(BaseExtractor):
         try:
             result = await asyncio.wait_for(
                 self._extract_innertube_stealth(video_id),
-                timeout=EXTRACTION_TIMEOUT,
+                timeout=10,
             )
             if result:
                 return result
