@@ -69,6 +69,32 @@ _INNERTUBE_CLIENTS = [
         "user_agent": "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     },
     _IOS_CLIENT,
+    # WEB client — sometimes works when others don't
+    {
+        "name": "WEB",
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20250225.01.00",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        "user_agent": None,  # use rotated stealth UA
+    },
+    # MWEB client — mobile web, another fallback
+    {
+        "name": "MWEB",
+        "context": {
+            "client": {
+                "clientName": "MWEB",
+                "clientVersion": "2.20250225.01.00",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        "user_agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    },
 ]
 
 _VIDEO_ID_RE = re.compile(
@@ -95,7 +121,21 @@ class YouTubeExtractor(BaseExtractor):
         if not video_id:
             raise ContentNotFoundError("Could not parse video ID from URL")
 
-        # Strategy 1: CF Worker proxy (visitorData + IOS client via Cloudflare's trusted IPs)
+        # Strategy 1: yt-dlp with impersonation (most reliable now)
+        try:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(self._extract_ytdlp, url),
+                timeout=EXTRACTION_TIMEOUT,
+            )
+            return self._info_to_media(info)
+        except asyncio.TimeoutError:
+            pass  # Try next strategy
+        except (ContentNotFoundError, AgeRestrictedError):
+            raise
+        except Exception:
+            pass  # Try next strategy
+
+        # Strategy 2: CF Worker proxy (visitorData + IOS client via Cloudflare's trusted IPs)
         if CF_PROXY_URL and CF_PROXY_SECRET:
             try:
                 result = await asyncio.wait_for(
@@ -111,10 +151,10 @@ class YouTubeExtractor(BaseExtractor):
             except Exception:
                 pass
 
-        # Strategy 2: Direct webpage scrape + InnerTube API (works on residential IPs)
+        # Strategy 3: Direct stealth InnerTube (curl_cffi TLS impersonation)
         try:
             result = await asyncio.wait_for(
-                self._extract_innertube_direct(video_id),
+                self._extract_innertube_stealth(video_id),
                 timeout=EXTRACTION_TIMEOUT,
             )
             if result:
@@ -126,21 +166,9 @@ class YouTubeExtractor(BaseExtractor):
         except Exception:
             pass
 
-        # Strategy 3: yt-dlp fallback
-        try:
-            info = await asyncio.wait_for(
-                asyncio.to_thread(self._extract_ytdlp, url),
-                timeout=EXTRACTION_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            raise ExtractionTimeoutError()
-        except (ContentNotFoundError, ExtractionFailedError, UpstreamError,
-                AgeRestrictedError, LoginRequiredError):
-            raise
-        except Exception:
-            raise ExtractionFailedError()
-
-        return self._info_to_media(info)
+        raise ExtractionFailedError(
+            "Could not extract this YouTube video. It may be restricted or unavailable."
+        )
 
     # ── CF Worker proxy strategy ──────────────────────────────────────
 
@@ -219,71 +247,80 @@ class YouTubeExtractor(BaseExtractor):
             data = api_resp.json()
             return self._player_response_to_media(data)
 
-    # ── Direct InnerTube strategy (no proxy) ──────────────────────────
+    # ── Direct stealth InnerTube strategy (curl_cffi TLS) ─────────────
 
-    async def _extract_innertube_direct(self, video_id: str) -> MediaInfo | None:
-        """Direct InnerTube extraction — works on residential IPs."""
-        async with httpx.AsyncClient(timeout=20) as client:
-            # Fetch webpage for visitorData and inline player response
-            visitor_data = ""
-            try:
-                resp = await client.get(
-                    f"https://www.youtube.com/watch?v={video_id}",
-                    headers=get_random_headers({"Accept-Language": "en-US,en;q=0.9"}),
-                    follow_redirects=True,
-                )
-                if resp.status_code == 200:
-                    text = resp.text
-                    m = _VISITOR_DATA_RE.search(text)
-                    if m:
-                        visitor_data = m.group(1)
-                    # Try inline player response
-                    m2 = _INITIAL_PLAYER_RE.search(text)
-                    if m2:
-                        try:
-                            wp_data = json.loads(m2.group(1))
-                            result = self._player_response_to_media(wp_data)
-                            if result:
-                                return result
-                        except (json.JSONDecodeError, Exception):
-                            pass
-            except Exception:
-                pass
+    async def _extract_innertube_stealth(self, video_id: str) -> MediaInfo | None:
+        """Direct InnerTube via stealth_fetch (curl_cffi TLS impersonation).
 
-            # Try each InnerTube client
-            for cfg in _INNERTUBE_CLIENTS:
-                try:
-                    context = copy.deepcopy(cfg["context"])
-                    if visitor_data:
-                        context["client"]["visitorData"] = visitor_data
-
-                    headers = {
-                        "User-Agent": cfg["user_agent"],
-                        "Content-Type": "application/json",
-                        "Origin": "https://www.youtube.com",
-                    }
-                    if visitor_data:
-                        headers["X-Goog-Visitor-Id"] = visitor_data
-
-                    resp = await client.post(
-                        _INNERTUBE_API_URL,
-                        params={"key": _INNERTUBE_API_KEY, "prettyPrint": "false"},
-                        json={
-                            "videoId": video_id,
-                            "context": context,
-                            "contentCheckOk": True,
-                            "racyCheckOk": True,
-                        },
-                        headers=headers,
-                    )
-                    if resp.status_code == 200:
-                        result = self._player_response_to_media(resp.json())
+        Unlike the old httpx version, this uses curl_cffi so YouTube can't
+        detect the Python TLS fingerprint.
+        """
+        # Step 1: Fetch webpage via stealth to get visitorData
+        visitor_data = ""
+        try:
+            resp = await stealth_fetch(
+                f"https://www.youtube.com/watch?v={video_id}",
+                headers={"Accept-Language": "en-US,en;q=0.9"},
+                timeout=20.0,
+            )
+            if resp.status_code == 200:
+                text = resp.text
+                m = _VISITOR_DATA_RE.search(text)
+                if m:
+                    visitor_data = m.group(1)
+                # Try inline player response
+                m2 = _INITIAL_PLAYER_RE.search(text)
+                if m2:
+                    try:
+                        wp_data = json.loads(m2.group(1))
+                        result = self._player_response_to_media(wp_data)
                         if result:
                             return result
-                except (ContentNotFoundError, AgeRestrictedError):
-                    raise
-                except Exception:
-                    continue
+                    except (json.JSONDecodeError, Exception):
+                        pass
+        except Exception:
+            pass
+
+        # Step 2: Try each InnerTube client via stealth_fetch
+        for cfg in _INNERTUBE_CLIENTS:
+            try:
+                context = copy.deepcopy(cfg["context"])
+                if visitor_data:
+                    context["client"]["visitorData"] = visitor_data
+
+                ua = cfg["user_agent"] or get_random_ua()
+                headers = {
+                    "User-Agent": ua,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.youtube.com",
+                    "Referer": "https://www.youtube.com/",
+                }
+                if visitor_data:
+                    headers["X-Goog-Visitor-Id"] = visitor_data
+
+                api_url = f"{_INNERTUBE_API_URL}?key={_INNERTUBE_API_KEY}&prettyPrint=false"
+                resp = await stealth_fetch(
+                    api_url,
+                    method="POST",
+                    headers=headers,
+                    json_body={
+                        "videoId": video_id,
+                        "context": context,
+                        "contentCheckOk": True,
+                        "racyCheckOk": True,
+                    },
+                    timeout=15.0,
+                    rate_limit=False,  # don't delay between client attempts
+                )
+
+                if resp.status_code == 200:
+                    result = self._player_response_to_media(resp.json())
+                    if result:
+                        return result
+            except (ContentNotFoundError, AgeRestrictedError):
+                raise
+            except Exception:
+                continue
 
         return None
 
@@ -298,6 +335,8 @@ class YouTubeExtractor(BaseExtractor):
             reason = playability.get("reason", "").lower()
             if "age" in reason:
                 raise AgeRestrictedError()
+            # Don't raise LoginRequiredError here — just return None so
+            # we can try the next InnerTube client or yt-dlp
             return None
 
         if status == "UNPLAYABLE":
@@ -364,9 +403,15 @@ class YouTubeExtractor(BaseExtractor):
         )
 
     def _extract_ytdlp(self, url: str) -> dict:
-        """Fallback: use yt-dlp."""
+        """Primary: use yt-dlp with full stealth + multiple client fallback."""
         opts = get_stealth_ytdlp_opts("best[ext=mp4]/best", {
             "extract_flat": False,
+            # Try multiple YouTube player clients for best coverage
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios", "web_creator", "mweb", "tv"],
+                },
+            },
         })
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
