@@ -1,6 +1,7 @@
 import asyncio
 import yt_dlp
 from app.extractors.base import BaseExtractor, classify_ytdlp_error
+from app.stealth import get_stealth_ytdlp_opts
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -53,12 +54,7 @@ class LinkedinExtractor(BaseExtractor):
         )
 
     def _extract_sync(self, url: str) -> dict:
-        ydl_opts = {
-            "format": "best[ext=mp4]/best",
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": 15,
-        }
+        ydl_opts = get_stealth_ytdlp_opts("best[ext=mp4]/best")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

@@ -2,6 +2,7 @@ import asyncio
 import yt_dlp
 from bs4 import BeautifulSoup
 from app.extractors.base import BaseExtractor, classify_ytdlp_error, proxy_fetch
+from app.stealth import get_stealth_ytdlp_opts, get_random_headers
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -72,12 +73,7 @@ class ThreadsExtractor(BaseExtractor):
         )
 
     def _ytdlp_sync(self, url: str) -> dict:
-        ydl_opts = {
-            "format": "best",
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": 15,
-        }
+        ydl_opts = get_stealth_ytdlp_opts("best")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -88,9 +84,7 @@ class ThreadsExtractor(BaseExtractor):
             classify_ytdlp_error(e)
 
     async def _extract_with_scraping(self, url: str) -> MediaInfo:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        }
+        headers = get_random_headers()
         try:
             response = await proxy_fetch(url, headers=headers)
         except Exception:

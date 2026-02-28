@@ -1,5 +1,6 @@
 import httpx
 from urllib.parse import urlparse
+from app.stealth import get_random_headers, HAS_CURL_CFFI
 
 ALLOWED_DOMAINS = {
     # YouTube
@@ -64,9 +65,28 @@ def is_allowed_domain(url: str) -> bool:
 
 
 async def stream_proxy(url: str):
-    """Generator that streams content from source."""
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        async with client.stream("GET", url) as response:
+    """Generator that streams content from source with stealth headers."""
+    headers = get_random_headers()
+    # Remove headers not appropriate for media downloads
+    for key in ("Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site",
+                "Sec-Fetch-User", "Upgrade-Insecure-Requests", "Cache-Control"):
+        headers.pop(key, None)
+
+    if HAS_CURL_CFFI:
+        # Use curl_cffi for TLS-impersonated streaming
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession(impersonate="chrome131", timeout=60) as s:
+                resp = await s.get(url, headers=headers, stream=True)
+                async for chunk in resp.aiter_content(65536):
+                    yield chunk
+                return
+        except Exception:
+            pass  # Fall back to httpx
+
+    # Fallback: httpx with stealth headers
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
+        async with client.stream("GET", url, headers=headers) as response:
             async for chunk in response.aiter_bytes(chunk_size=65536):
                 yield chunk
 
@@ -78,14 +98,15 @@ async def get_upstream_headers(url: str) -> dict:
     progress instead of an indeterminate spinner.
     Falls back to an empty dict if the upstream doesn't support HEAD.
     """
+    headers = get_random_headers()
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
-            head = await client.head(url)
-            headers = {}
+            head = await client.head(url, headers=headers)
+            result = {}
             if "content-length" in head.headers:
-                headers["Content-Length"] = head.headers["content-length"]
+                result["Content-Length"] = head.headers["content-length"]
             if "content-type" in head.headers:
-                headers["X-Upstream-Content-Type"] = head.headers["content-type"]
-            return headers
+                result["X-Upstream-Content-Type"] = head.headers["content-type"]
+            return result
     except Exception:
         return {}

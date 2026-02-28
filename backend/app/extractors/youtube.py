@@ -5,6 +5,7 @@ import re
 import httpx
 import yt_dlp
 from app.extractors.base import BaseExtractor, classify_ytdlp_error, CF_PROXY_URL, CF_PROXY_SECRET
+from app.stealth import get_stealth_ytdlp_opts, get_random_headers, stealth_fetch, get_random_ua
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -163,10 +164,7 @@ class YouTubeExtractor(BaseExtractor):
                     headers=proxy_headers,
                     json={
                         "url": f"https://www.youtube.com/watch?v={video_id}",
-                        "headers": {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                            "Accept-Language": "en-US,en;q=0.9",
-                        },
+                        "headers": get_random_headers({"Accept-Language": "en-US,en;q=0.9"}),
                     },
                 )
                 if vd_resp.status_code == 200:
@@ -231,10 +229,7 @@ class YouTubeExtractor(BaseExtractor):
             try:
                 resp = await client.get(
                     f"https://www.youtube.com/watch?v={video_id}",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    },
+                    headers=get_random_headers({"Accept-Language": "en-US,en;q=0.9"}),
                     follow_redirects=True,
                 )
                 if resp.status_code == 200:
@@ -370,13 +365,9 @@ class YouTubeExtractor(BaseExtractor):
 
     def _extract_ytdlp(self, url: str) -> dict:
         """Fallback: use yt-dlp."""
-        opts = {
-            "format": "best[ext=mp4]/best",
-            "quiet": True,
-            "no_warnings": True,
+        opts = get_stealth_ytdlp_opts("best[ext=mp4]/best", {
             "extract_flat": False,
-            "socket_timeout": 15,
-        }
+        })
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)

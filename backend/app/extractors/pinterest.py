@@ -2,6 +2,7 @@ import re
 import asyncio
 from bs4 import BeautifulSoup
 from app.extractors.base import BaseExtractor, proxy_fetch
+from app.stealth import get_random_headers
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -34,10 +35,7 @@ class PinterestExtractor(BaseExtractor):
             raise ExtractionFailedError()
 
     async def _do_extract(self, url: str) -> MediaInfo:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
+        headers = get_random_headers()
 
         try:
             response = await proxy_fetch(url, headers=headers, timeout=12.0)

@@ -1,6 +1,7 @@
 import asyncio
 import re
 from app.extractors.base import BaseExtractor, proxy_fetch
+from app.stealth import get_random_headers
 from app.models import MediaInfo
 from app.exceptions import (
     ContentNotFoundError,
@@ -66,7 +67,7 @@ class SpotifyExtractor(BaseExtractor):
         # Get metadata from oEmbed API (always works, no auth)
         oembed_resp = await proxy_fetch(
             f"https://open.spotify.com/oembed?url={original_url}",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; Linkloader/1.0)"},
+            headers=get_random_headers(),
         )
 
         if oembed_resp.status_code == 404:
@@ -83,9 +84,7 @@ class SpotifyExtractor(BaseExtractor):
 
         # Try to get the actual audio stream from the embed page
         embed_url = f"https://open.spotify.com/embed/episode/{episode_id}"
-        embed_resp = await proxy_fetch(embed_url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        })
+        embed_resp = await proxy_fetch(embed_url, headers=get_random_headers())
 
         if embed_resp.status_code != 200:
             raise ExtractionFailedError("Could not access episode embed page")
