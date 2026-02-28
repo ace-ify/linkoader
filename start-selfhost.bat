@@ -19,6 +19,11 @@ if not exist "%VENV_PYTHON%" (
     exit /b 1
 )
 
+:: Refresh PATH locally to ensure winget installations (like ngrok) are found
+for /f "tokens=2*" %%A in ('reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path') do set "syspath=%%B"
+for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "usrpath=%%B"
+set "PATH=%syspath%;%usrpath%;%PATH%"
+
 :: Check ngrok exists
 where ngrok >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
