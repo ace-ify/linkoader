@@ -13,7 +13,9 @@ use `get_stealth_ytdlp_opts()` for yt-dlp calls.
 """
 
 import asyncio
+import os
 import random
+import tempfile
 import time
 from dataclasses import dataclass, field
 
@@ -24,6 +26,14 @@ except ImportError:
     HAS_CURL_CFFI = False
 
 import httpx
+
+# ──────────────────────────────────────────────────────────────────────
+# Persistent cookie file for yt-dlp (survives across extractions)
+# ──────────────────────────────────────────────────────────────────────
+_COOKIE_DIR = os.path.join(tempfile.gettempdir(), "linkoader_cookies")
+os.makedirs(_COOKIE_DIR, exist_ok=True)
+YTDLP_COOKIE_FILE = os.path.join(_COOKIE_DIR, "ytdlp_cookies.txt")
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Browser profiles — complete header sets that match real browsers
@@ -356,6 +366,7 @@ def get_stealth_ytdlp_opts(
     Adds:
     - Browser impersonation (curl_cffi TLS)
     - Randomized headers
+    - Persistent cookie jar (survives across extractions!)
     - Request rate limiting
     - Retry logic
     """
@@ -365,14 +376,20 @@ def get_stealth_ytdlp_opts(
         "format": format_spec,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
         # Anti-detection: browser impersonation via curl_cffi
         "http_headers": profile["headers"],
+        # Persistent cookie jar — critical for YouTube!
+        # Without this, each extraction starts a fresh session and
+        # YouTube flags you as a bot after the first request.
+        "cookiefile": YTDLP_COOKIE_FILE,
         # Retries
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 5,
+        "fragment_retries": 5,
         # Rate limiting — don't hammer servers
         "sleep_interval_requests": 0.5,
+        # Don't abort on unavailable fragments (helps with live/VOD)
+        "skip_unavailable_fragments": True,
     }
 
     # Enable TLS impersonation if curl_cffi is available
