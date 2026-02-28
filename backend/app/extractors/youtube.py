@@ -121,11 +121,29 @@ class YouTubeExtractor(BaseExtractor):
         if not video_id:
             raise ContentNotFoundError("Could not parse video ID from URL")
 
-        # Strategy 1: yt-dlp with impersonation (most reliable now)
+        # Strategy 1: CF Worker proxy (Cloudflare's trusted IPs — best for datacenter)
+        # This should be tried FIRST on deployed servers (Render/Railway)
+        # because they use datacenter IPs that YouTube blocks.
+        if CF_PROXY_URL and CF_PROXY_SECRET:
+            try:
+                result = await asyncio.wait_for(
+                    self._extract_via_proxy(video_id),
+                    timeout=15,
+                )
+                if result:
+                    return result
+            except asyncio.TimeoutError:
+                pass  # Try next strategy
+            except (ContentNotFoundError, AgeRestrictedError):
+                raise
+            except Exception:
+                pass
+
+        # Strategy 2: yt-dlp with curl_cffi impersonation + cookie persistence
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(self._extract_ytdlp, url),
-                timeout=15,  # Fast fail so we can try other strategies
+                timeout=15,
             )
             return self._info_to_media(info)
         except asyncio.TimeoutError:
@@ -134,22 +152,6 @@ class YouTubeExtractor(BaseExtractor):
             raise
         except Exception:
             pass  # Try next strategy
-
-        # Strategy 2: CF Worker proxy (visitorData + IOS client via Cloudflare's trusted IPs)
-        if CF_PROXY_URL and CF_PROXY_SECRET:
-            try:
-                result = await asyncio.wait_for(
-                    self._extract_via_proxy(video_id),
-                    timeout=12,
-                )
-                if result:
-                    return result
-            except asyncio.TimeoutError:
-                raise ExtractionTimeoutError()
-            except (ContentNotFoundError, AgeRestrictedError):
-                raise
-            except Exception:
-                pass
 
         # Strategy 3: Direct stealth InnerTube (curl_cffi TLS impersonation)
         try:
@@ -160,7 +162,7 @@ class YouTubeExtractor(BaseExtractor):
             if result:
                 return result
         except asyncio.TimeoutError:
-            raise ExtractionTimeoutError()
+            pass
         except (ContentNotFoundError, AgeRestrictedError, LoginRequiredError):
             raise
         except Exception:
