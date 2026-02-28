@@ -50,8 +50,8 @@ echo  If you claimed a static domain online, edit this file to run:
 echo  ngrok http --url=YOUR-DOMAIN.ngrok-free.app %PORT%
 echo  -------------------------------------------------------------
 echo.
-:: Starts a basic tunnel (or change to your static domain if you have one)
-ngrok http %PORT%
+:: Starts the tunnel on your permanent static domain
+ngrok http --domain=ashlynn-pseudoalveolar-gus.ngrok-free.dev %PORT%
 
 :: If ngrok exits, also stop backend
 echo.
