@@ -52,7 +52,6 @@ _INNERTUBE_CLIENTS = [
         },
         "user_agent": "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     },
-    _IOS_CLIENT,
     # WEB client — sometimes works when others don't
     {
         "name": "WEB",
