@@ -42,16 +42,28 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [2/2] Starting ngrok Tunnel...
+
+:: Read NGROK_DOMAIN from .env if it exists
+set NGROK_DOMAIN=
+if exist "%BACKEND_DIR%\.env" (
+    for /f "tokens=1,2 delims==" %%a in (%BACKEND_DIR%\.env) do (
+        if "%%a"=="NGROK_DOMAIN" set NGROK_DOMAIN=%%b
+    )
+)
+
 echo.
-echo  A new terminal window opens with your public URL.
-echo  Look for "Forwarding: https://your-domain.ngrok-free.app"
-echo.
-echo  If you claimed a static domain online, edit this file to run:
-echo  ngrok http --url=YOUR-DOMAIN.ngrok-free.app %PORT%
-echo  -------------------------------------------------------------
-echo.
-:: Starts the tunnel on your permanent static domain
-ngrok http --domain=ashlynn-pseudoalveolar-gus.ngrok-free.dev %PORT%
+if defined NGROK_DOMAIN (
+    echo  Starting permanent tunnel on: https://%NGROK_DOMAIN%
+    echo  -------------------------------------------------------------
+    echo.
+    ngrok http --domain=%NGROK_DOMAIN% %PORT%
+) else (
+    echo  Starting basic ephemeral tunnel...
+    echo  Look for "Forwarding: https://your-domain.ngrok-free.app"
+    echo  -------------------------------------------------------------
+    echo.
+    ngrok http %PORT%
+)
 
 :: If ngrok exits, also stop backend
 echo.
