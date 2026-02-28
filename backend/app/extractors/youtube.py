@@ -4,7 +4,7 @@ import json
 import re
 import httpx
 import yt_dlp
-from app.extractors.base import BaseExtractor, classify_ytdlp_error, CF_PROXY_URL, CF_PROXY_SECRET
+from app.extractors.base import BaseExtractor, classify_ytdlp_error
 from app.stealth import get_stealth_ytdlp_opts, get_random_headers, stealth_fetch, get_random_ua
 from app.models import MediaInfo
 from app.exceptions import (
@@ -21,22 +21,6 @@ EXTRACTION_TIMEOUT = 20  # Must fit within main.py's 25s limit
 # InnerTube API — same endpoint YouTube's own apps hit.
 _INNERTUBE_API_URL = "https://www.youtube.com/youtubei/v1/player"
 _INNERTUBE_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-
-# IOS client — works best through CF Worker proxy with visitorData
-_IOS_CLIENT = {
-    "context": {
-        "client": {
-            "clientName": "IOS",
-            "clientVersion": "21.02.3",
-            "deviceMake": "Apple",
-            "deviceModel": "iPhone16,2",
-            "osName": "iPhone",
-            "osVersion": "18.3.2.22D82",
-            "hl": "en",
-        },
-    },
-    "user_agent": "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
-}
 
 # Fallback clients for direct (non-proxy) InnerTube calls
 _INNERTUBE_CLIENTS = [
@@ -121,25 +105,7 @@ class YouTubeExtractor(BaseExtractor):
         if not video_id:
             raise ContentNotFoundError("Could not parse video ID from URL")
 
-        # Strategy 1: CF Worker proxy (Cloudflare's trusted IPs — best for datacenter)
-        # This should be tried FIRST on deployed servers (Render/Railway)
-        # because they use datacenter IPs that YouTube blocks.
-        if CF_PROXY_URL and CF_PROXY_SECRET:
-            try:
-                result = await asyncio.wait_for(
-                    self._extract_via_proxy(video_id),
-                    timeout=15,
-                )
-                if result:
-                    return result
-            except asyncio.TimeoutError:
-                pass  # Try next strategy
-            except (ContentNotFoundError, AgeRestrictedError):
-                raise
-            except Exception:
-                pass
-
-        # Strategy 2: yt-dlp with curl_cffi impersonation + cookie persistence
+        # Strategy 1: yt-dlp with curl_cffi impersonation + cookie persistence
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(self._extract_ytdlp, url),
@@ -153,7 +119,7 @@ class YouTubeExtractor(BaseExtractor):
         except Exception:
             pass  # Try next strategy
 
-        # Strategy 3: Direct stealth InnerTube (curl_cffi TLS impersonation)
+        # Strategy 2: Direct stealth InnerTube (curl_cffi TLS impersonation)
         try:
             result = await asyncio.wait_for(
                 self._extract_innertube_stealth(video_id),
@@ -171,83 +137,6 @@ class YouTubeExtractor(BaseExtractor):
         raise ExtractionFailedError(
             "Could not extract this YouTube video. It may be restricted or unavailable."
         )
-
-    # ── CF Worker proxy strategy ──────────────────────────────────────
-
-    async def _extract_via_proxy(self, video_id: str) -> MediaInfo | None:
-        """Use CF Worker proxy to bypass YouTube's datacenter IP blocking.
-
-        1. Proxy fetches YouTube page → we extract visitorData
-        2. Proxy calls InnerTube API with visitorData + IOS client → streams
-        """
-        proxy_headers = {
-            "Content-Type": "application/json",
-            "X-Proxy-Secret": CF_PROXY_SECRET,
-        }
-
-        async with httpx.AsyncClient(timeout=25) as client:
-            # Step 1: Get visitorData from YouTube page via proxy
-            visitor_data = ""
-            try:
-                vd_resp = await client.post(
-                    CF_PROXY_URL,
-                    headers=proxy_headers,
-                    json={
-                        "url": f"https://www.youtube.com/watch?v={video_id}",
-                        "headers": get_random_headers({"Accept-Language": "en-US,en;q=0.9"}),
-                    },
-                )
-                if vd_resp.status_code == 200:
-                    m = _VISITOR_DATA_RE.search(vd_resp.text)
-                    if m:
-                        visitor_data = m.group(1)
-
-                    # Also try to get player response from webpage
-                    m2 = _INITIAL_PLAYER_RE.search(vd_resp.text)
-                    if m2:
-                        try:
-                            wp_data = json.loads(m2.group(1))
-                            result = self._player_response_to_media(wp_data)
-                            if result:
-                                return result
-                        except (json.JSONDecodeError, Exception):
-                            pass
-            except Exception:
-                pass
-
-            if not visitor_data:
-                return None
-
-            # Step 2: Call InnerTube API via proxy with visitorData + IOS client
-            context = copy.deepcopy(_IOS_CLIENT["context"])
-            context["client"]["visitorData"] = visitor_data
-
-            api_resp = await client.post(
-                CF_PROXY_URL,
-                headers=proxy_headers,
-                json={
-                    "url": f"{_INNERTUBE_API_URL}?key={_INNERTUBE_API_KEY}&prettyPrint=false",
-                    "method": "POST",
-                    "headers": {
-                        "User-Agent": _IOS_CLIENT["user_agent"],
-                        "Content-Type": "application/json",
-                        "Origin": "https://www.youtube.com",
-                        "X-Goog-Visitor-Id": visitor_data,
-                    },
-                    "payload": {
-                        "videoId": video_id,
-                        "context": context,
-                        "contentCheckOk": True,
-                        "racyCheckOk": True,
-                    },
-                },
-            )
-
-            if api_resp.status_code != 200:
-                return None
-
-            data = api_resp.json()
-            return self._player_response_to_media(data)
 
     # ── Direct stealth InnerTube strategy (curl_cffi TLS) ─────────────
 

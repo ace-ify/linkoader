@@ -12,11 +12,6 @@ import httpx
 import os
 import re
 
-# Cloudflare Worker proxy config — set these env vars on Render
-CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "")
-CF_PROXY_SECRET = os.environ.get("CF_PROXY_SECRET", "")
-
-
 @dataclass
 class ProxyResponse:
     """Lightweight response object returned by proxy_fetch."""
@@ -37,38 +32,10 @@ async def proxy_fetch(
     json_body: dict | None = None,
     timeout: float = 15.0,
 ) -> ProxyResponse:
-    """Fetch a URL with stealth, routing through CF Worker proxy if configured.
-
+    """Fetch a URL with stealth.
+    
     Uses curl_cffi TLS impersonation + realistic browser headers.
-    Falls back to CF Worker proxy → stealth direct request.
     """
-    if CF_PROXY_URL and CF_PROXY_SECRET:
-        # Route through Cloudflare Worker, but with stealth headers
-        stealth_headers = get_random_headers(headers)
-        payload: dict = {"url": url, "method": method}
-        payload["headers"] = stealth_headers
-        if json_body and method in ("POST", "PUT", "PATCH"):
-            payload["payload"] = json_body
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                resp = await client.post(
-                    CF_PROXY_URL,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-Proxy-Secret": CF_PROXY_SECRET,
-                    },
-                    json=payload,
-                )
-                return ProxyResponse(
-                    status_code=resp.status_code,
-                    text=resp.text,
-                    headers=dict(resp.headers),
-                )
-        except Exception:
-            # CF Worker failed, fall through to stealth direct
-            pass
-
     # Direct stealth request (curl_cffi TLS + rotated headers)
     resp = await stealth_fetch(
         url,
