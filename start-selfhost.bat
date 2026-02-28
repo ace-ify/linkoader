@@ -48,11 +48,13 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [2/2] Starting ngrok Tunnel...
 
-:: Read NGROK_DOMAIN from .env if it exists
+:: Read NGROK_DOMAIN and NGROK_AUTHTOKEN from .env if it exists
 set NGROK_DOMAIN=
+set NGROK_AUTHTOKEN=
 if exist "%BACKEND_DIR%\.env" (
     for /f "tokens=1,2 delims==" %%a in (%BACKEND_DIR%\.env) do (
         if "%%a"=="NGROK_DOMAIN" set NGROK_DOMAIN=%%b
+        if "%%a"=="NGROK_AUTHTOKEN" set NGROK_AUTHTOKEN=%%b
     )
 )
 
