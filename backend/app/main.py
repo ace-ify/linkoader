@@ -104,7 +104,7 @@ async def extraction_error_handler(request: Request, exc: ExtractionError):
 
 
 @_app.post("/api/extract")
-@limiter.limit("15/minute;100/hour")
+@limiter.limit(os.getenv("RATE_LIMIT_EXTRACT", "15/minute;100/hour"))
 async def extract(request: Request, body: ExtractRequest):
     url = str(body.url)
     extractor = router.resolve(url)
@@ -144,7 +144,7 @@ async def extract(request: Request, body: ExtractRequest):
 
 
 @_app.get("/api/proxy-download")
-@limiter.limit("5/minute")
+@limiter.limit(os.getenv("RATE_LIMIT_PROXY", "5/minute"))
 async def proxy_download(
     request: Request,
     url: str = Query(..., description="Direct download URL to proxy"),
