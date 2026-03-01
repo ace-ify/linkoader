@@ -1,137 +1,76 @@
 <a name="top"></a>
 
 <h1 align="center">Linkloader</h1>
-<p align="center">Paste any link. Get the file.</p>
+<p align="center"><strong>The stealthy, self-hosted universal media extractor.</strong></p>
 <p align="center">
-  <a href="#supported-platforms">Platforms</a> ·
-  <a href="#local-setup">Local Setup</a> ·
-  <a href="#environment-variables">Env Vars</a> ·
-  <a href="#adding-a-platform">Extend It</a> ·
-  <a href="#deployment">Deployment</a>
+  <a href="#the-architecture-bypassing-anti-bot-defenses">The Architecture</a> ·
+  <a href="#supported-platforms">Supported Platforms</a> ·
+  <a href="#quick-start-self-hosting">Self-Hosting</a> ·
+  <a href="#how-it-works">How it Works</a>
 </p>
 
 ---
 
-Linkloader is a minimal, privacy-respecting media downloader. Users paste a URL from a supported platform and get a direct file download — video, audio, image, or document. No accounts, no tracking, no data stored.
+**Linkloader** is a minimal, privacy-respecting media downloader. Paste a URL from a supported social platform and get a direct file download (video, audio, or image) at maximum quality. 
+
+Built as **Project 1 of my [#SudoShipIt Challenge](https://www.linkedin.com/hashtag/sudoshipit/)** (6 projects in 6 weeks).
+
+## The Architecture: Bypassing Anti-Bot Defenses
+
+Modern social platforms (YouTube, Pinterest, Instagram) employ aggressive anti-bot protections. Generic cloud deployments (like Render, AWS, or Fly.io) use known datacenter IP ranges, which are instantly flagged and shadowbanned when attempting to extract media.
+
+**The Solution: Self-Hosting & Residential IPs**
+
+Linkloader bypasses these restrictions by running the extraction engine locally on your personal machine (using your residential IP), while serving the frontend cleanly on the web. 
+
+1. **Frontend:** Hosted on Vercel.
+2. **Backend:** Runs locally via Python FastAPI.
+3. **The Bridge:** We use `ngrok` to securely tunnel the local backend to a permanent public URL, which the frontend communicates with.
+
+By using residential IPs combined with TLS fingerprint spoofing (`curl_cffi`), the platforms see standard user traffic, allowing fast and reliable extractions without the need for expensive rotating proxy pools.
 
 ## Supported Platforms
 
-| Platform | Videos | Images | Reels/Shorts |
-|---|---|---|---|
-| YouTube | ✅ | — | ✅ Shorts |
-| Instagram | ✅ | ✅ | ✅ Reels |
-| Facebook | ✅ | — | ✅ Reels |
-| Pinterest | ✅ | ✅ | — |
+| Platform | Videos | Images | Reels/Shorts | Supported Extractors |
+|---|---|---|---|---|
+| **YouTube** | ✅ | — | ✅ | `yt-dlp`, Direct InnerTube API |
+| **Instagram** | ✅ | ✅ | ✅ | Private API, GraphQL |
+| **Pinterest** | ✅ | ✅ | — | DOM Parsing, API extraction |
+| **Facebook** | ✅ | — | ✅ | Mobile API |
 
-More platforms via the extractor plugin system — see [Adding a Platform](#adding-a-platform).
+*Linkloader uses an auto-discovering plugin system. Dropping a new `platform.py` in the `extractors/` folder automatically adds support for it.*
 
-## Architecture
+## Quick Start (Self-Hosting)
 
-```
-linkoader/
-├── backend/          # FastAPI — extraction + proxy streaming
-│   ├── app/
-│   │   ├── extractors/   # One file per platform (auto-discovered)
-│   │   ├── main.py       # API routes
-│   │   ├── proxy.py      # Streaming proxy with Content-Length forwarding
-│   │   ├── router.py     # Auto-discovery of extractors
-│   │   ├── models.py     # Pydantic schemas
-│   │   └── exceptions.py
-│   ├── Dockerfile
-│   ├── Procfile
-│   └── requirements.txt
-└── frontend/         # React + Vite + TypeScript + Tailwind v4
-    └── src/
-        ├── components/   # DownloadButton (streaming progress), URLInput, etc.
-        ├── hooks/        # useExtract
-        └── lib/          # api.ts, validate.ts
-```
-
-## Local Setup
+Because Linkloader requires a residential IP to work reliably, you run the backend on your own machine. 
 
 ### Prerequisites
+- Windows OS (for the automated startup script)
 - Python 3.12+
-- Node.js 20+
+- Node.js 20+ (if running the frontend locally)
+- [ngrok](https://ngrok.com/) installed (`winget install ngrok.ngrok` from the MS Store)
 
-### Backend
+### 1. Backend Setup (One-Click)
+1. Clone the repository.
+2. Go to `backend/` and copy `.env.example` to `.env`.
+3. Add your `NGROK_AUTHTOKEN` and an optional static `NGROK_DOMAIN` to the `.env` file.
+4. Double-click **`start-selfhost.bat`**.
 
-```bash
-cd backend
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
+That's it! The batch script automatically activates the virtual environment, starts the FastAPI server, and launches the ngrok tunnel. 
 
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000
-```
+### 2. Frontend Setup
+1. Go to `frontend/`.
+2. Run `npm install`.
+3. Copy `.env.example` to `.env` and set `VITE_API_URL` to your new ngrok domain (e.g., `https://your-domain.ngrok-free.app`).
+4. Run `npm run dev`.
 
-### Frontend
+Open `http://localhost:5173` and start extracting!
 
-```bash
-cd frontend
-npm install
-cp .env.example .env          # set VITE_API_URL=http://localhost:8000
-npm run dev
-```
+## Privacy & Design Principles
 
-Open [http://localhost:5173](http://localhost:5173).
-
-## Environment Variables
-
-### Backend (`backend/.env`)
-
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `8000` | Server port |
-| `ALLOWED_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
-| `RATE_LIMIT_EXTRACT` | `15/minute;100/hour` | Rate limit for `/api/extract` |
-| `RATE_LIMIT_PROXY` | `5/minute` | Rate limit for `/api/proxy-download` |
-
-### Frontend (`frontend/.env`)
-
-| Variable | Default | Description |
-|---|---|---|
-| `VITE_API_URL` | `` (empty = same origin) | Backend API base URL |
-
-## Adding a Platform
-
-1. Create `backend/app/extractors/yourplatform.py`
-2. Implement the `BaseExtractor` interface:
-
-```python
-from app.extractors.base import BaseExtractor
-from app.models import MediaInfo
-
-class YourPlatformExtractor(BaseExtractor):
-    SUPPORTED_PATTERNS = [
-        r"https?://(www\.)?yourplatform\.com/...",
-    ]
-
-    async def extract(self, url: str) -> MediaInfo:
-        # fetch, parse, return MediaInfo(...)
-        ...
-```
-
-3. Restart the backend — it auto-discovers the new extractor. No registration needed.
-
-## Deployment
-
-See [`docs/deployment-plan.md`](docs/deployment-plan.md) for detailed hosting options (Railway, Render, Fly.io, Vercel + backend PaaS, self-hosted Docker).
-
-**Short version:**
-- **Frontend** → Vercel (zero-config, `vercel.json` included)
-- **Backend** → Railway / Render / Fly.io (Dockerfile + Procfile included)
-
-## Design Principles
-
-- **Monochrome UI** — Inter for text, JetBrains Mono for technical data
-- **Privacy first** — no user data stored, no cookies, no analytics
-- **Real-time downloads** — fetch + ReadableStream with live progress, speed, and cancel
-- **Plugin architecture** — drop a new `.py` file to support a new platform
-- **Respects reduced motion** — all animations disabled when OS preference is set
+- **Zero Data Stored:** No accounts, no tracking, no databases. Extractions happen in memory and stream directly to the client.
+- **Real-time downloads:** Uses `ReadableStream` to proxy downloads directly from the platform to the user, bypassing cors limitations while showing live progress.
+- **Minimalist UI:** Built with React, Tailwind v4, and Lucide icons. Respects OS-level reduced motion preferences.
 
 ## License
 
